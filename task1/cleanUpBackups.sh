@@ -1,0 +1,1 @@
+find /var/db/postgres2/backup/full -maxdepth 1 -type d -name "20*" -mtime +7 -exec rm -rf {} \;
