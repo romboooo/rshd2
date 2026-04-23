@@ -1,2 +1,2 @@
 0 0 * * 3 /var/db/postgres2/backup.sh >> /var/db/postgres2/backup/cron.log 2>&1
-0 0 * * 0 /var/db/postgres2/cleanUpBackups.sh
+0 0 * * 0 /var/db/postgres2/cleanUpBackups.sh >> /var/db/postgres2/backup/cron.log 2>&1
