@@ -175,10 +175,6 @@ pg_basebackup: базовое резервное копирование заве
 backup_manifest                                       100%  290KB  91.7MB/s   00:00    
 base.tar.gz                                           100%   29MB 110.9MB/s   00:00    
 pg_wal.tar.gz                                         100%   18KB  43.0MB/s   00:00    
-mv: /var/db/postgres2/backup/full/2026-04-23-16-40-29/16392.tar.gz: set owner/group (was: 772/0): Operation not permitted
-mv: /var/db/postgres2/backup/full/2026-04-23-16-40-29/backup_manifest: set owner/group (was: 772/0): Operation not permitted
-mv: /var/db/postgres2/backup/full/2026-04-23-16-40-29/base.tar.gz: set owner/group (was: 772/0): Operation not permitted
-mv: /var/db/postgres2/backup/full/2026-04-23-16-40-29/pg_wal.tar.gz: set owner/group (was: 772/0): Operation not permitted
 ok!
 
 ```
@@ -224,7 +220,7 @@ find /var/db/postgres1/backup/wal_archive -type f -mtime +28 -delete -print
 [postgres1@pg104 ~]$ 
 ```
 
-### каков будет объем резервных копий спустя месяц работы ?
+### каков будет объем резервных копий спустя месяц работы ? при среднем коэффициенте сжатия base‑данных 4x и wal 3x
 
 ```sh
 echo $(( (70*100/4) + (30*900/3) ))
@@ -344,3 +340,307 @@ stgres1@pg104 ~]$ psql -h localhost -U postgres2 -p 9867 -l
 ```
 
 ## этап 3
+
+### останавливаем бд на основном узле
+```
+[postgres2@pg101 ~]$ pg_ctl stop -D /var/db/postgres2/wzo28 -m immediate
+ожидание завершения работы сервера.... готово
+сервер остановлен
+[postgres2@pg101 ~]$ 
+```
+
+### "удаляем" wal
+
+```sh
+mv /var/db/postgres2/wzo28/pg_wal /var/db/postgres2/wzo28/pg_wal.broken
+```
+
+### сервер РЕАЛЬНО не доступен
+```
+[postgres2@pg101 ~]$ pg_ctl start -D /var/db/postgres2/wzo28
+ожидание запуска сервера....2026-04-21 18:55:09.078 GMT [3306] СООБЩЕНИЕ:  передача вывода в протокол процессу сбора протоколов
+2026-04-21 18:55:09.078 GMT [3306] ПОДСКАЗКА:  В дальнейшем протоколы будут выводиться в каталог "log".
+ прекращение ожидания
+pg_ctl: не удалось запустить сервер
+Изучите протокол выполнения.
+[postgres2@pg101 ~]$ 
+```
+
+### подготавливаем окружение
+```sh
+NEW_DATA="/var/db/postgres2/wzo28_new"
+mkdir -p $NEW_DATA
+chmod 0700 $NEW_DATA
+cd /var/db/postgres2/backup/full/2026-04-21-21-22-45
+```
+
+### распаковываемся
+
+```sh
+tar -xzf base.tar.gz -C $NEW_DATA
+mkdir -p $NEW_DATA/pg_wal
+tar -xzf pg_wal.tar.gz -C $NEW_DATA/pg_wal
+
+tar -xzf 16392.tar.gz -C /var/db/postgres2/tbs_16392
+```
+
+
+### ccылка на табличное пространство
+```sh
+ln -s /var/db/postgres2/tbs_16392 $NEW_DATA/pg_tblspc/16392
+```
+
+### создаем signal файл (чтобы перевести сервер в ремим REPLICA)
+
+```sh
+touch /var/db/postgres2/wzo28_new/standby.signal
+```
+
+### пробуем запустить
+
+```
+[postgres2@pg101 ~]$ pg_ctl -D /var/db/postgres2/wzo28_new start
+ожидание запуска сервера....2026-04-23 16:57:02.491 GMT [70327] СООБЩЕНИЕ:  передача вывода в протокол процессу сбора протоколов
+2026-04-23 16:57:02.491 GMT [70327] ПОДСКАЗКА:  В дальнейшем протоколы будут выводиться в каталог "log".
+ готово
+сервер запущен
+[postgres2@pg101 ~]$ 
+```
+ 
+### проверка
+
+```
+[postgres2@pg101 ~]$ psql -h 127.0.0.1 -p 9867 -U postgres2 -d postgres -c "SELECT pg_is_in_recovery();"
+Пароль пользователя postgres2: 
+ pg_is_in_recovery 
+-------------------
+ f
+(1 строка)
+
+[postgres2@pg101 ~]$ psql -h 127.0.0.1 -p 9867 -U postgres2 -l
+psql -h 127.0.0.1 -p 9867 -U rmb -d illgreennews -c "SELECT * FROM articles LIMIT 3;"
+Пароль пользователя postgres2: 
+                                                             Список баз данных
+     Имя      | Владелец  | Кодировка | Провайдер локали |  LC_COLLATE  |   LC_CTYPE   | локаль ICU | Правила ICU |      Права доступа      
+--------------+-----------+-----------+------------------+--------------+--------------+------------+-------------+-------------------------
+ bench_test   | postgres2 | SQL_ASCII | libc             | ru_RU.CP1251 | ru_RU.CP1251 |            |             | 
+ bench_test2  | postgres2 | SQL_ASCII | libc             | ru_RU.CP1251 | ru_RU.CP1251 |            |             | 
+ illgreennews | rmb       | WIN1251   | libc             | ru_RU.CP1251 | ru_RU.CP1251 |            |             | =Tc/rmb                +
+              |           |           |                  |              |              |            |             | rmb=CTc/rmb
+ postgres     | postgres2 | WIN1251   | libc             | ru_RU.CP1251 | ru_RU.CP1251 |            |             | 
+ template0    | postgres2 | WIN1251   | libc             | ru_RU.CP1251 | ru_RU.CP1251 |            |             | =c/postgres2           +
+              |           |           |                  |              |              |            |             | postgres2=CTc/postgres2
+ template1    | postgres2 | WIN1251   | libc             | ru_RU.CP1251 | ru_RU.CP1251 |            |             | =c/postgres2           +
+              |           |           |                  |              |              |            |             | postgres2=CTc/postgres2
+(6 строк)
+
+Пароль пользователя rmb: 
+ id |   title   | content |         created_at         
+----+-----------+---------+----------------------------
+  1 | Article X | Text X  | 2026-04-23 13:27:04.192007
+  2 | Article Y | Text Y  | 2026-04-23 13:27:04.192007
+  3 | Article Z | Text Z  | 2026-04-23 13:27:04.192007
+(3 строки)
+
+[postgres2@pg101 ~]$ 
+
+```
+
+
+## этап 4
+
+### немного подготовим таблицы 
+
+```sql
+INSERT INTO articles (title, content) VALUES
+  ('Article X', 'Text X'),
+  ('Article Y', 'Text Y'),
+  ('Article Z', 'Text Z');
+
+INSERT INTO comments (article_id, author, body) VALUES
+  (1, 'UserX', 'Comment to X'),
+  (2, 'UserY', 'Comment to Y'),
+  (3, 'UserZ', 'Comment to Z');
+  ```
+
+```
+INSERT 0 3
+INSERT 0 3
+```
+
+### сделаем бэкап
+```sh
+./backup.sh
+```
+
+```
+g_basebackup: начинается базовое резервное копирование, ожидается завершение контрольной точки
+pg_basebackup: контрольная точка завершена
+pg_basebackup: стартовая точка в журнале предзаписи: 0/90000028 на линии времени 2
+pg_basebackup: запуск фонового процесса считывания WAL
+pg_basebackup: создан временный слот репликации "pg_basebackup_32002"
+374485/374485 КБ (100%), табличное пространство 1/2 (....2026-04-23-16-40-29/base.tar.gz374485/374485 КБ (100%), табличное пространство 2/2                                         
+pg_basebackup: конечная точка в журнале предзаписи: 0/90000138
+pg_basebackup: ожидание завершения потоковой передачи фоновым процессом...
+pg_basebackup: сохранение данных на диске...
+pg_basebackup: переименование backup_manifest.tmp в backup_manifest
+pg_basebackup: базовое резервное копирование завершено
+16392.tar.gz                                          100%  932     3.9MB/s   00:00    
+backup_manifest                                       100%  290KB  91.7MB/s   00:00    
+base.tar.gz                                           100%   29MB 110.9MB/s   00:00    
+pg_wal.tar.gz                                         100%   18KB  43.0MB/s   00:00    
+ok!
+```
+
+### проверим что бэкапы создались
+
+```
+[postgres2@pg101 ~]$ ls /var/db/postgres2/backup/full
+2026-04-17-19-23-41	2026-04-21-21-22-45
+2026-04-19-15-02-29	2026-04-23-16-40-29
+[postgres2@pg101 ~]$ ssh postgres1@pg104 "ls /var/db/postgres1/backup/full"
+2026-04-17-19-23-41
+2026-04-19-15-02-29
+2026-04-21-21-22-45
+2026-04-23-16-40-29
+```
+
+### засидим бд грязными данными
+
+```
+[postgres2@pg101 ~]$ psql -h localhost -U postgres2 -p 9867 -d illgreennews
+Пароль пользователя postgres2: 
+psql (16.4)
+Введите "help", чтобы получить справку.
+
+illgreennews=# SELECT now();   
+UPDATE articles SET title = 'TRASH', content = 'GARBAGE';
+SELECT * FROM articles;   
+
+              now              
+-------------------------------
+ 2026-04-23 13:41:52.489713+00
+(1 строка)
+
+UPDATE 3
+ id | title | content |         created_at         
+----+-------+---------+----------------------------
+  1 | TRASH | GARBAGE | 2026-04-23 13:27:04.192007
+  2 | TRASH | GARBAGE | 2026-04-23 13:27:04.192007
+  3 | TRASH | GARBAGE | 2026-04-23 13:27:04.192007
+(3 строки)
+
+illgreennews=# 
+```
+
+
+### подключаемся к pg104
+
+### создаем рк на резервном узле
+
+```sh
+BACKUP_DIR=/var/db/postgres1/backup/full/2026-04-23-16-40-29
+TMP_PGDATA=/var/db/postgres1/tmp_pgdata
+
+mkdir -p $TMP_PGDATA
+chmod 0700 $TMP_PGDATA
+
+cd $BACKUP_DIR
+
+tar -xzf base.tar.gz -C $TMP_PGDATA
+mkdir -p $TMP_PGDATA/pg_wal
+
+tar -xzf pg_wal.tar.gz -C $TMP_PGDATA/pg_wal
+mkdir -p /var/db/postgres1/tmp_tbs
+
+tar -xzf 16392.tar.gz -C /var/db/postgres1/tmp_tbs
+rm -f $TMP_PGDATA/pg_tblspc/16392
+
+ln -s /var/db/postgres1/tmp_tbs $TMP_PGDATA/pg_tblspc/16392
+echo "port = 9868" >> $TMP_PGDATA/postgresql.conf
+```
+
+
+### делаем дамп и отправляем его на основной узел
+
+```sh
+pg_dump -h localhost -U postgres2 -p 9868 -d illgreennews \
+  -t articles -t comments --data-only --column-inserts \
+  > /tmp/illgreennews_clean.sql
+
+pg_ctl -D $TMP_PGDATA stop
+rm -rf $TMP_PGDATA /var/db/postgres1/tmp_tbs
+
+scp /tmp/illgreennews_clean.sql postgres2@pg101:/tmp/
+```
+
+
+### обратно на pg101
+
+### восстанавливаем данные на основном узле
+
+```
+[postgres2@pg101 ~]$ psql -h localhost -U postgres2 -p 9867 -d illgreennews -c "DELETE FROM comments; DELETE FROM articles;"
+Пароль пользователя postgres2: 
+DELETE 3
+DELETE 3
+[postgres2@pg101 ~]$ psql -h localhost -U postgres2 -p 9867 -d illgreennews -f /tmp/illgreennews_clean.sql
+Пароль пользователя postgres2: 
+SET
+SET
+SET
+SET
+SET
+ set_config 
+------------
+ 
+(1 строка)
+
+SET
+SET
+SET
+SET
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+ setval 
+--------
+      3
+(1 строка)
+
+ setval 
+--------
+      3
+(1 строка)
+```
+
+### проверим
+```
+[postgres2@pg101 ~]$ psql -h localhost -U postgres2 -p 9867 -d illgreennews -c "select * FROM comments; select * FROM articles;"
+Пароль пользователя postgres2: 
+ id | article_id | author |     body     
+----+------------+--------+--------------
+  1 |          1 | UserX  | Comment to X
+  2 |          2 | UserY  | Comment to Y
+  3 |          3 | UserZ  | Comment to Z
+(3 строки)
+
+ id |   title   | content |         created_at         
+----+-----------+---------+----------------------------
+  1 | Article X | Text X  | 2026-04-23 13:27:04.192007
+  2 | Article Y | Text Y  | 2026-04-23 13:27:04.192007
+  3 | Article Z | Text Z  | 2026-04-23 13:27:04.192007
+(3 строки)
+
+[postgres2@pg101 ~]$
+```
+
+### данные восстановлены!
+
+```
+вывод
+в ходе лабораторной работы я настроил процедуру периодического резервного копирования базы данных, сконфигурированной в ходе выполнения лабораторной работы 2, а также разработал и отладил сценарии восстановления в случае сбоев. ыполнил физический и логические бэкапы.
+```
